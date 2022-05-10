@@ -13,9 +13,11 @@ import (
 )
 
 type ComputeAddress struct {
-	Address     string
-	Region      string
-	AddressType string
+	Address                string
+	Region                 string
+	AddressType            string
+	Purpose                string
+	InstancePurchaseOption string
 
 	// usage args
 	AddressUsageType *string `infracost_usage:"address_type"`
@@ -31,34 +33,33 @@ func (r *ComputeAddress) PopulateUsage(u *schema.UsageData) {
 
 func (r *ComputeAddress) BuildResource() *schema.Resource {
 	addressType := r.AddressType
-	if strings.ToLower(addressType) == "internal" {
+	isFreePurpose := r.Purpose != "" && strings.ToLower(r.Purpose) != "gce_endpoint"
+
+	if strings.ToLower(addressType) == "internal" || isFreePurpose {
 		return &schema.Resource{
-			Name:      r.Address,
-			NoPrice:   true,
-			IsSkipped: true, UsageSchema: ComputeAddressUsageSchema,
+			Name:        r.Address,
+			NoPrice:     true,
+			IsSkipped:   true,
+			UsageSchema: ComputeAddressUsageSchema,
 		}
 	}
 
 	costComponents := []*schema.CostComponent{}
 
-	usageType, err := r.validateAddressUsageType()
+	usageType, err := r.detectUsageType()
 	if err != "" {
 		log.Warnf(err)
 	}
 
 	switch usageType {
 	case "standard_vm":
-		costComponents = append(costComponents, r.standardVMComputeAddress(true))
+		costComponents = append(costComponents, r.standardVMComputeAddress(1))
 	case "preemptible_vm":
-		costComponents = append(costComponents, r.preemptibleVMComputeAddress(true))
+		costComponents = append(costComponents, r.preemptibleVMComputeAddress(1))
 	case "unused":
-		costComponents = append(costComponents, r.unusedVMComputeAddress(true))
+		costComponents = append(costComponents, r.unusedVMComputeAddress(1))
 	default:
-		costComponents = append(costComponents,
-			r.standardVMComputeAddress(false),
-			r.preemptibleVMComputeAddress(false),
-			r.unusedVMComputeAddress(false),
-		)
+		costComponents = append(costComponents, r.unusedVMComputeAddress(0))
 	}
 
 	return &schema.Resource{
@@ -68,17 +69,18 @@ func (r *ComputeAddress) BuildResource() *schema.Resource {
 	}
 }
 
-func (r *ComputeAddress) standardVMComputeAddress(used bool) *schema.CostComponent {
-	usedBy := ""
-	if !used {
-		usedBy = "if used by "
+func (r *ComputeAddress) standardVMComputeAddress(count int64) *schema.CostComponent {
+	var quantity *decimal.Decimal
+
+	if count > 0 {
+		quantity = decimalPtr(decimal.NewFromInt(count))
 	}
 
 	return &schema.CostComponent{
-		Name:           fmt.Sprintf("IP address (%sstandard VM)", usedBy),
+		Name:           "IP address (standard VM)",
 		Unit:           "hours",
 		UnitMultiplier: decimal.NewFromInt(1),
-		HourlyQuantity: decimalPtr(decimal.NewFromInt(1)),
+		HourlyQuantity: quantity,
 		ProductFilter: &schema.ProductFilter{
 			VendorName:    strPtr("gcp"),
 			Region:        strPtr("global"),
@@ -94,17 +96,18 @@ func (r *ComputeAddress) standardVMComputeAddress(used bool) *schema.CostCompone
 	}
 }
 
-func (r *ComputeAddress) preemptibleVMComputeAddress(used bool) *schema.CostComponent {
-	usedBy := ""
-	if !used {
-		usedBy = "if used by "
+func (r *ComputeAddress) preemptibleVMComputeAddress(count int64) *schema.CostComponent {
+	var quantity *decimal.Decimal
+
+	if count > 0 {
+		quantity = decimalPtr(decimal.NewFromInt(count))
 	}
 
 	return &schema.CostComponent{
-		Name:           fmt.Sprintf("IP address (%spreemptible VM)", usedBy),
+		Name:           "IP address (preemptible VM)",
 		Unit:           "hours",
 		UnitMultiplier: decimal.NewFromInt(1),
-		HourlyQuantity: decimalPtr(decimal.NewFromInt(1)),
+		HourlyQuantity: quantity,
 		ProductFilter: &schema.ProductFilter{
 			VendorName:    strPtr("gcp"),
 			Region:        strPtr("global"),
@@ -120,17 +123,18 @@ func (r *ComputeAddress) preemptibleVMComputeAddress(used bool) *schema.CostComp
 	}
 }
 
-func (r *ComputeAddress) unusedVMComputeAddress(used bool) *schema.CostComponent {
-	usedBy := ""
-	if !used {
-		usedBy = "if "
+func (r *ComputeAddress) unusedVMComputeAddress(count int64) *schema.CostComponent {
+	var quantity *decimal.Decimal
+
+	if count > 0 {
+		quantity = decimalPtr(decimal.NewFromInt(count))
 	}
 
 	return &schema.CostComponent{
-		Name:           fmt.Sprintf("IP address (%sunused)", usedBy),
+		Name:           "IP address (unused)",
 		Unit:           "hours",
 		UnitMultiplier: decimal.NewFromInt(1),
-		HourlyQuantity: decimalPtr(decimal.NewFromInt(1)),
+		HourlyQuantity: quantity,
 		ProductFilter: &schema.ProductFilter{
 			VendorName:    strPtr("gcp"),
 			Region:        strPtr(r.Region),
@@ -146,12 +150,19 @@ func (r *ComputeAddress) unusedVMComputeAddress(used bool) *schema.CostComponent
 	}
 }
 
-func (r *ComputeAddress) validateAddressUsageType() (string, string) {
+func (r *ComputeAddress) detectUsageType() (string, string) {
 	validTypes := []string{"standard_vm", "preemptible_vm", "unused"}
 
 	usageType := ""
 
 	if r.AddressUsageType == nil {
+		switch r.InstancePurchaseOption {
+		case "on_demand":
+			return "standard_vm", ""
+		case "preemptible":
+			return "preemptible_vm", ""
+		}
+
 		return usageType, ""
 	}
 
